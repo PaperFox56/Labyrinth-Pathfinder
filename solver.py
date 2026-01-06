@@ -3,9 +3,13 @@ This is the module containing the actual pathfinder. It can either be imported i
 or be launched directly from the terminal. In the latter case, a path to a file containing the \
 labyrinth's map in python array syntax should be provided.
 """
+import matplotlib.pyplot as plt
+import matplotlib
 import numpy as np
 import sys
 import time
+
+matplotlib.use("TkAgg")
 
 ## Utility functions
 def shift_down(a):
@@ -59,18 +63,20 @@ one start and one finish")
     dist /= 2
 
     wall_mask = np.where(labyrinth_map == 0, 0, 1)
-    initial_state = np.zeros_like(labyrinth_map) # create a matrix containing only infinities
-    initial_state[start[0], start[1]] = 1
-    initial_state[finish[0], finish[1]] = -1
+    initial_state = np.zeros_like(labyrinth_map) # create a matrix containing only zeros
+    initial_state[start[0], start[1]] = 1        # Place the start cell
+    initial_state[finish[0], finish[1]] = -1     # Place the finish cell
 
     return (wall_mask, initial_state, dist)
 
-
+#@profile
 def find_shortest_path(labyrinth_map: np.ndarray) -> list:
     """This function is the true entry point of the pathfinder. It takes in the the labyrinth's \
 map and output the shortest path from the start to the end of the labyrinth"""
+
+    start_time = time.time_ns()
+
     wall_mask, state, min_dist = initialize(labyrinth_map)
-    previous_state = np.copy(state)
 
     path_found = False
     step = 1
@@ -84,7 +90,7 @@ map and output the shortest path from the start to the end of the labyrinth"""
         ### Check if we found a path ###
         if step >= min_dist:
             vertical_check = np.argwhere(up * state < 0)
-            horizontal_check = np.argwhere(up * state < 0)
+            horizontal_check = np.argwhere(right * state < 0)
 
             if len(vertical_check) > 0 or len(horizontal_check) > 0:
                 # That's it we have it
@@ -98,34 +104,35 @@ map and output the shortest path from the start to the end of the labyrinth"""
 
         ### Propagate the distances in each direction ###
         down = shift_down(state)
-        left = shift_left(state)
 
-        new_distances = up
+        new_distances = shift_left(state)
 
-        for m in [right, down, left]:
+        for m in [right, down, up]:
             mask = m != 0
 
-            np.copyto(new_distances, m, where=(new_distances < 0) & (new_distances < m) & mask)
-            np.copyto(new_distances, m, where=(new_distances > 0) & (new_distances > m) & mask)
+            np.copyto(new_distances, m, where=((((new_distances <= 0) & (new_distances < m)) | 
+                                                ((new_distances >= 0) & (new_distances > m)))) & mask)
             np.copyto(new_distances, m, where=new_distances == 0)
 
-        new_distances = np.where(new_distances < 0, new_distances-1, new_distances)
-        new_distances = np.where(new_distances > 0, new_distances+1, new_distances)
+        # The following lines makes sure that the `new_distances` matrix only contain the updated cells
+        new_distances *= np.where(state == 0, wall_mask, 0)
 
-        mask = np.where(state == 0, 1, 0)
-        state += new_distances * mask * wall_mask
+        new_distances += new_distances > 0
+        new_distances -= new_distances < 0
 
-        
-        #print(state)
 
         ### Check that we are not stuck
-        if (state == previous_state).all():
+        if (new_distances == 0).all():
             #print("No solution exist for this labyrinth")
-            return None
+            return None, time.time_ns() - start_time, 0, step
 
-        previous_state = state.copy()
+        state += new_distances
         step += 1
 
+        #print(state)
+
+    elapsed1 = time.time_ns() - start_time
+    start_time = time.time_ns()
 
     if path_found:
         # Reconsruct the path from the meeting point
@@ -181,29 +188,26 @@ map and output the shortest path from the start to the end of the labyrinth"""
             x, y = largest[0]
             path.append((x, y))
 
-        return path
+        elapsed2 = time.time_ns() - start_time
+        return path, elapsed1, elapsed2, step
 
 
 
 
 if __name__ == "__main__":
-    lab_map = np.array([
-        [0, 2, 1, 0, 0],
-        [0, 1, 0, 1, 0],
-        [1, 1, 1, 1, 1],
-        [1, 1, 1, 0, 1],
-        [1, 1, 1, 3, 1],
-    ])
-
     s = 100
-
 
     max_time = 0
     min_time = 1_000_000
     total_time = 0
 
-    for i in range(1000):
-        lab_map = np.where(np.random.rand(s, s) < .4, 0, 1)
+    matrix_calculations = []
+    path_building = []
+    steps = []
+
+    for i in range(100):
+        complexity = .4
+        lab_map = np.where(np.random.rand(s, s) < complexity, 0, 1)
 
         a, b, c, d = [np.random.randint(0, s), np.random.randint(0, s), np.random.randint(0, s), np.random.randint(0, s)]
 
@@ -216,10 +220,13 @@ if __name__ == "__main__":
 
         print(i+1)
 
-        start_time = time.time_ns()
-        path = find_shortest_path(lab_map)
+        path, elapsed1, elapsed2, step = find_shortest_path(lab_map)
 
-        elapsed = time.time_ns() - start_time
+        matrix_calculations.append(elapsed1 / 1_000_000)
+        path_building.append(elapsed2 / 1_000_000)
+        steps.append(step)
+
+        elapsed = elapsed1 + elapsed2
 
         total_time += elapsed
 
@@ -228,6 +235,15 @@ if __name__ == "__main__":
 
         if elapsed < min_time:
             min_time = elapsed
+
+
+    m = max(matrix_calculations)
+    n = max(steps)
+    plt.hist([matrix_calculations], bins=np.arange(0, m, m / 10), edgecolor='blue')
+    plt.show()
+
+    plt.hist([steps], bins=np.arange(0, n, n / 10), color ="red")
+    plt.show()
 
     print(f"Max time: {max_time // 1_000_000}ms")
     print(f"Min time: {min_time // 1_000_000}ms")
