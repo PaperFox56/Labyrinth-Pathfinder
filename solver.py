@@ -1,251 +1,333 @@
 """
-This is the module containing the actual pathfinder. It can either be imported in another module \
-or be launched directly from the terminal. In the latter case, a path to a file containing the \
-labyrinth's map in python array syntax should be provided.
+Pathfinding Module
+------------------
+
+This module contains a pathfinding algorithm for 2D labyrinths represented as numpy arrays.
+It can be imported or run directly. When executed from the terminal, a labyrinth map file
+can be provided (Python array syntax).
+
+Labyrinth map conventions:
+    0 : wall
+    1 : empty cell
+    2 : start cell
+    3 : finish cell
+
+The algorithm propagates distances from the start (+1) and finish (-1) simultaneously
+until they meet, then reconstructs the shortest path.
 """
-import matplotlib.pyplot as plt
-import matplotlib
 import numpy as np
 import sys
 import time
 
-matplotlib.use("TkAgg")
+# -------------------------
+# Global variables (for visualization/debugging)
+# -------------------------
+states = []  # List of propagation states for visualization
+walls = None # Wall mask used for plotting
 
-## Utility functions
-def shift_down(a):
+# -------------------------
+# Constants
+# -------------------------
+INT_MAX = np.iinfo(np.int64).max
+INT_MIN = np.iinfo(np.int64).min
+
+# -------------------------
+# Shift functions
+# -------------------------
+def shift_down(a: np.ndarray) -> np.ndarray:
+    """Return a matrix shifted down by one row; top row is zeros."""
     out = np.zeros_like(a)
     out[1:] = a[:-1]
     return out
 
-def shift_up(a):
+def shift_up(a: np.ndarray) -> np.ndarray:
+    """Return a matrix shifted up by one row; bottom row is zeros."""
     out = np.zeros_like(a)
     out[:-1] = a[1:]
     return out
 
-def shift_left(a):
+def shift_left(a: np.ndarray) -> np.ndarray:
+    """Return a matrix shifted left by one column; rightmost column is zeros."""
     out = np.zeros_like(a)
     out[:, :-1] = a[:, 1:]
     return out
 
-def shift_right(a):
+def shift_right(a: np.ndarray) -> np.ndarray:
+    """Return a matrix shifted right by one column; leftmost column is zeros."""
     out = np.zeros_like(a)
     out[:, 1:] = a[:, :-1]
     return out
 
+# -------------------------
+# Labyrinth generation
+# -------------------------
+def generate_random_labyrinth(s: int, complexity: float = 0.4) -> np.ndarray:
+    """
+    Generate a random labyrinth of size s x s.
 
-def initialize(labyrinth_map: np.ndarray) -> tuple:
-    """\
-This function's goal is to convert the map given to a structure useful for the algorithm.
-This function expect the following properties about the provided matrix:
-    - There should be exactly one cell marked as start (2) as well as exactly one marked as finish (3)
+    Args:
+        s (int): Size of labyrinth (rows = cols = s)
+        complexity (float): Probability of a wall. Default 0.4
 
-It works as follow:
-    - use the original map to generate a mask (numpy matrix) where walls are encoded by 0s and \
-any other cell is set to 1.
-    - still using the original map, create a numpy matrix where the start is represented by +1 \
-and the finish by -1, everything else is filled with 0s
-"""
-    # check that there is indeed only one start and one finish
+    Returns:
+        np.ndarray: Labyrinth matrix with 0 = wall, 1 = empty, 2 = start, 3 = finish
+    """
+    lab_map = np.where(np.random.rand(s, s) < complexity, 0, 1)
+
+    # Pick start and finish positions (must not be identical)
+    a, b, c, d = [np.random.randint(0, s) for _ in range(4)]
+    while a == c and b == d:
+        a = np.random.randint(0, s)
+
+    lab_map[a, b] = 2  # Start
+    lab_map[c, d] = 3  # Finish
+
+    return lab_map
+
+# -------------------------
+# Initialization
+# -------------------------
+def initialize(labyrinth_map: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
+    """
+    Prepare the labyrinth for pathfinding.
+
+    Args:
+        labyrinth_map (np.ndarray): 2D map of labyrinth
+
+    Returns:
+        tuple:
+            - wall_mask: 1 for empty cells, 0 for walls
+            - initial_state: start = +1, finish = -1, others = 0
+            - min_dist: Manhattan distance / 2 (lower bound for path steps)
+    """
     start = np.argwhere(labyrinth_map == 2)
     finish = np.argwhere(labyrinth_map == 3)
 
     if len(start) != 1 or len(finish) != 1:
-        print("Initialization error: The map given doesn't follow the syntax, there should be only \
-one start and one finish")
-        sys.exit() # TODO: Handle this exception better
+        print("Initialization error: There should be exactly one start (2) and one finish (3).")
+        sys.exit()
 
-    # We get the actual coordinates
     start = start[0]
     finish = finish[0]
 
-    # Calculate manathan distance between the end and the start then divide bytwo to get the expected minimum lenght of the path
-    dist = abs(start[0] - finish[0]) + abs(start[1] - finish[1]) -1
-    dist /= 2
+    dist = (abs(start[0] - finish[0]) + abs(start[1] - finish[1]) - 1) / 2
 
     wall_mask = np.where(labyrinth_map == 0, 0, 1)
-    initial_state = np.zeros_like(labyrinth_map) # create a matrix containing only zeros
-    initial_state[start[0], start[1]] = 1        # Place the start cell
-    initial_state[finish[0], finish[1]] = -1     # Place the finish cell
+    initial_state = np.zeros_like(labyrinth_map)
+    initial_state[start[0], start[1]] = 1
+    initial_state[finish[0], finish[1]] = -1
 
-    return (wall_mask, initial_state, dist)
+    return wall_mask, initial_state, dist
 
-#@profile
-def find_shortest_path(labyrinth_map: np.ndarray) -> list:
-    """This function is the true entry point of the pathfinder. It takes in the the labyrinth's \
-map and output the shortest path from the start to the end of the labyrinth"""
+# -------------------------
+# Pathfinder
+# -------------------------
+def find_shortest_path(labyrinth_map: np.ndarray, visualize: bool = False):
+    """
+    Find the shortest path from start to finish.
+
+    Args:
+        labyrinth_map (np.ndarray): Labyrinth map
+        visualize (bool): If True, store states for visualization
+
+    Returns:
+        tuple:
+            - path (list of tuples) or None
+            - propagation_time (ns)
+            - reconstruction_time (ns)
+            - steps (int)
+    """
+    global walls
 
     start_time = time.time_ns()
 
     wall_mask, state, min_dist = initialize(labyrinth_map)
+    walls = wall_mask
 
     path_found = False
     step = 1
-
     meetpoints = None
+    states.append(state.copy())
+
+    prev_min_neg = 0
+    prev_max_pos = 0
 
     while not path_found:
         up = shift_up(state)
         right = shift_right(state)
 
-        ### Check if we found a path ###
+        # Check for collision (start/finish fronts meet)
         if step >= min_dist:
-            vertical_check = np.argwhere(up * state < 0)
-            horizontal_check = np.argwhere(right * state < 0)
-
-            if len(vertical_check) > 0 or len(horizontal_check) > 0:
-                # That's it we have it
-                #print("We have it !")
-                #print(up * state)
-                #print(right * state)
+            collision = (up * state < 0) | (right * state < 0)
+            if collision.any():
                 path_found = True
-                meetpoints = np.append(vertical_check, horizontal_check, axis=0)
-                #print(meetpoints)
+                meetpoints = np.argwhere(collision)
                 break
 
-        ### Propagate the distances in each direction ###
+        # Propagate distances
         down = shift_down(state)
+        left = shift_left(state)
 
-        new_distances = shift_left(state)
-
-        for m in [right, down, up]:
-            mask = m != 0
-
-            np.copyto(new_distances, m, where=((((new_distances <= 0) & (new_distances < m)) | 
-                                                ((new_distances >= 0) & (new_distances > m)))) & mask)
-            np.copyto(new_distances, m, where=new_distances == 0)
-
-        # The following lines makes sure that the `new_distances` matrix only contain the updated cells
-        new_distances *= np.where(state == 0, wall_mask, 0)
-
-        new_distances += new_distances > 0
-        new_distances -= new_distances < 0
-
-
-        ### Check that we are not stuck
-        if (new_distances == 0).all():
-            #print("No solution exist for this labyrinth")
-            return None, time.time_ns() - start_time, 0, step
+        neighbors = np.stack([up, down, left, right])
+        pos = np.where(neighbors > 0, neighbors, INT_MAX).min(axis=0)
+        neg = np.where(neighbors < 0, neighbors, INT_MIN).max(axis=0)
+        new_distances = np.where(pos != INT_MAX, pos + 1,
+                                 np.where(neg != INT_MIN, neg - 1, 0))
+        new_distances *= np.where(state == 0, wall_mask, 0)  # Only update empty cells
 
         state += new_distances
         step += 1
 
-        #print(state)
+        if visualize:
+            states.append(state.copy())
 
+        max_pos = np.where(state > 0, state, INT_MIN).max()
+        min_neg = np.where(state < 0, state, INT_MAX).min()
+
+        # Check for no progress, meaning no solution
+        if abs(max_pos + min_neg) > 1 or (min_neg == prev_min_neg and max_pos == prev_max_pos):
+            return None, time.time_ns() - start_time, 0, step
+
+        prev_max_pos = max_pos
+        prev_min_neg = min_neg
+
+    # -------------------------
+    # Path reconstruction
+    # -------------------------
     elapsed1 = time.time_ns() - start_time
     start_time = time.time_ns()
+    path = []
 
     if path_found:
-        # Reconsruct the path from the meeting point
-
         s = state.shape
-
         x, y = int(meetpoints[0][0]), int(meetpoints[0][1])
-        path = [(x, y)]
+        path.append((x, y))
 
-        # first go from the meetpoint to the start
+        # From meetpoint to start
         while state[x, y] != 1:
-            # look for the smallest positive number in th neibourhood
             smallest = ((0, 0), np.inf)
+            neighbors = []
+            if x >= 1: neighbors.append((x-1, y))
+            if y >= 1: neighbors.append((x, y-1))
+            if x < s[0]-1: neighbors.append((x+1, y))
+            if y < s[1]-1: neighbors.append((x, y+1))
 
-            neibourhood = []
-            if x >= 1: neibourhood.append((x-1, y))
-            if y >= 1: neibourhood.append((x, y-1))
-            if x < s[0]-1: neibourhood.append((x+1, y))
-            if y < s[1]-1: neibourhood.append((x, y+1))
-
-            for i, j in neibourhood:
+            for i, j in neighbors:
                 val = state[i, j]
-                #print(val, smallest, len(neibourhood))
-
                 if val > 0 and val < smallest[1]:
                     smallest = ((i, j), val)
-            
+
             x, y = smallest[0]
             path.append((x, y))
-
         path.reverse()
 
+        # From meetpoint to finish
         x, y = int(meetpoints[0][0]), int(meetpoints[0][1])
-
-        # now go from the meetpoint to the end
         while state[x, y] != -1:
-            # look for the largest negative number in the neibourhood
-            largest = ((0, 0), -100000)
+            largest = ((0, 0), -1000000000)
+            neighbors = []
+            if x >= 1: neighbors.append((x-1, y))
+            if y >= 1: neighbors.append((x, y-1))
+            if x < s[0]-1: neighbors.append((x+1, y))
+            if y < s[1]-1: neighbors.append((x, y+1))
 
-            neibourhood = []
-            if x >= 1: neibourhood.append((x-1, y))
-            if y >= 1: neibourhood.append((x  , y-1))
-            if x < s[0]-1: neibourhood.append((x+1, y))
-            if y < s[1]-1: neibourhood.append((x  , y+1))
-
-            for i, j in neibourhood:
+            for i, j in neighbors:
                 val = state[i, j]
-                #print(val,largest)
-
                 if val < 0 and val > largest[1]:
                     largest = ((i, j), val)
-            
+
             x, y = largest[0]
             path.append((x, y))
 
-        elapsed2 = time.time_ns() - start_time
-        return path, elapsed1, elapsed2, step
-
-
+    elapsed2 = time.time_ns() - start_time
+    return path, elapsed1, elapsed2, step
 
 
 if __name__ == "__main__":
-    s = 100
+    """
+    Visualization Script
+    --------------------
+    This section runs when the module is executed directly from the terminal.
+    It generates a random labyrinth, computes the shortest path, and allows the 
+    user to step through the propagation process using matplotlib.
 
-    max_time = 0
-    min_time = 1_000_000
-    total_time = 0
+    Controls:
+        - Right arrow: advance one step
+        - Left arrow: go back one step
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib
+    matplotlib.use("TkAgg")  # Use TkAgg backend for interactive plotting
 
-    matrix_calculations = []
-    path_building = []
-    steps = []
+    # Current frame index for stepping through states
+    current = 0
+    fig, ax = plt.subplots()
 
-    for i in range(100):
-        complexity = .4
-        lab_map = np.where(np.random.rand(s, s) < complexity, 0, 1)
+    def update_plot():
+        """Update the matplotlib plot to display the current propagation state."""
+        mat = states[current]
 
-        a, b, c, d = [np.random.randint(0, s), np.random.randint(0, s), np.random.randint(0, s), np.random.randint(0, s)]
+        # Plot walls + propagation matrix
+        im = ax.imshow(
+            mat + walls*.5,
+            cmap="seismic",      # Red/blue for start/finish fronts
+            interpolation="none" # No smoothing
+        )
 
-        while a == c and b == d: a = np.random.randint(0, s)
+        # Optional: annotate cell values for debugging
+        # for i in range(mat.shape[0]):
+        #     for j in range(mat.shape[1]):
+        #         ax.text(
+        #             j, i,
+        #             f"{mat[i, j]}",
+        #             ha="center", va="center",
+        #             color="black"
+        #         )
 
-        lab_map[a, b] = 2
-        lab_map[c, d] = 3
+        fig.canvas.draw()
 
-        #print(lab_map)
+    def on_press(event):
+        """Handle left/right key presses to step through the propagation frames."""
+        global current
+        if event.key == 'right':
+            current = (current + 1) % len(states)
+            print(f"Step forward → frame {current}")  # Debug print
+        elif event.key == 'left':
+            current = (current - 1) % len(states)
+            print(f"Step backward → frame {current}")  # Debug print
 
-        print(i+1)
+        update_plot()
 
-        path, elapsed1, elapsed2, step = find_shortest_path(lab_map)
+    # -------------------------
+    # Generate labyrinth and solve
+    # -------------------------
+    s = 50  # Labyrinth size
+    lab_map = generate_random_labyrinth(s)
+    #print("Generated labyrinth:")
+    #print(lab_map)  # Debug: show the labyrinth in the terminal
 
-        matrix_calculations.append(elapsed1 / 1_000_000)
-        path_building.append(elapsed2 / 1_000_000)
-        steps.append(step)
+    # Find shortest path and store all propagation states
+    path, propagation_time, reconstruction_time, steps = find_shortest_path(lab_map, visualize=True)
+    if path:
+        print(f"Path found in {steps} steps!")
+        print("Shortest path:", path)
+        print(f"Propagation time: {propagation_time / 1e6:.2f} ms")
+        print(f"Path reconstruction time: {reconstruction_time / 1e6:.2f} ms")
+    else:
+        print("No path exists for this labyrinth.")
 
-        elapsed = elapsed1 + elapsed2
+    # -------------------------
+    # Set up interactive plotting
+    # -------------------------
 
-        total_time += elapsed
+    l = np.zeros((s, s))
 
-        if elapsed > max_time:
-            max_time = elapsed
+    if path: 
+        for i, j in path:
+            l[i, j] = .5
 
-        if elapsed < min_time:
-            min_time = elapsed
+    states.append(l)
 
-
-    m = max(matrix_calculations)
-    n = max(steps)
-    plt.hist([matrix_calculations], bins=np.arange(0, m, m / 10), edgecolor='blue')
+    fig.canvas.mpl_connect('key_press_event', on_press)
+    update_plot()
     plt.show()
-
-    plt.hist([steps], bins=np.arange(0, n, n / 10), color ="red")
-    plt.show()
-
-    print(f"Max time: {max_time // 1_000_000}ms")
-    print(f"Min time: {min_time // 1_000_000}ms")
-    print(f"Total time: {total_time // 1_000_000}ms")
-    #print(path)
