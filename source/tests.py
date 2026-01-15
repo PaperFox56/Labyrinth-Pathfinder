@@ -13,7 +13,7 @@ def test_initialization():
 
     print(solver.initialize(lab_map))
 
-def test_speed(s=100, c=100):
+def test_speed(size=100, count=100):
 
     max_time = 0
     min_time = 1_000_000_000_000
@@ -23,9 +23,9 @@ def test_speed(s=100, c=100):
     path_building = []
     steps = []
 
-    for i in range(c):
+    for i in range(count):
 
-        lab_map = solver.generate_random_labyrinth(s)
+        lab_map = solver.generate_random_labyrinth(size)
 
         print(i+1)
 

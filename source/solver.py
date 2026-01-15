@@ -16,14 +16,9 @@ The algorithm propagates distances from the start (+1) and finish (-1) simultane
 until they meet, then reconstructs the shortest path.
 """
 import numpy as np
-import sys
 import time
 
 # -------------------------
-# Global variables (for visualization/debugging)
-# -------------------------
-states = []  # List of propagation states for visualization
-walls = None # Wall mask used for plotting
 
 # -------------------------
 # Constants
@@ -104,15 +99,16 @@ def initialize(labyrinth_map: np.ndarray) -> tuple[np.ndarray, np.ndarray, float
     finish = np.argwhere(labyrinth_map == 3)
 
     if len(start) != 1 or len(finish) != 1:
-        print("Initialization error: There should be exactly one start (2) and one finish (3).")
-        sys.exit()
+        return Exception("Initialization error: There should be exactly one start (2) and one finish (3).")
 
     start = start[0]
     finish = finish[0]
 
+    # expected number of steps before what it is physically impossible for a path to have been found (half of the manathan distance between the end and start)
     dist = (abs(start[0] - finish[0]) + abs(start[1] - finish[1]) - 1) / 2
 
     wall_mask = np.where(labyrinth_map == 0, 0, 1)
+
     initial_state = np.zeros_like(labyrinth_map)
     initial_state[start[0], start[1]] = 1
     initial_state[finish[0], finish[1]] = -1
@@ -122,13 +118,13 @@ def initialize(labyrinth_map: np.ndarray) -> tuple[np.ndarray, np.ndarray, float
 # -------------------------
 # Pathfinder
 # -------------------------
-def find_shortest_path(labyrinth_map: np.ndarray, visualize: bool = False):
+def find_shortest_path(labyrinth_map: np.ndarray, visualize_freq: int = -1, states: list = None) -> tuple:
     """
     Find the shortest path from start to finish.
 
     Args:
         labyrinth_map (np.ndarray): Labyrinth map
-        visualize (bool): If True, store states for visualization
+        visualize_freq (bool): If True, store states for visualization
 
     Returns:
         tuple:
@@ -137,59 +133,13 @@ def find_shortest_path(labyrinth_map: np.ndarray, visualize: bool = False):
             - reconstruction_time (ns)
             - steps (int)
     """
-    global walls
 
     start_time = time.time_ns()
 
-    wall_mask, state, min_dist = initialize(labyrinth_map)
-    walls = wall_mask
+    meetpoints = [] # This array will contain the list of meetpoints
 
-    path_found = False
-    step = 1
-    meetpoints = None
-    states.append(state.copy())
+    path_found, state, step_taken = propagate_distances_through_map(labyrinth_map, meetpoints, visualize_freq, states)
 
-    prev_min_neg = 0
-    prev_max_pos = 0
-
-    while not path_found:
-        up = shift_up(state)
-        right = shift_right(state)
-
-        # Check for collision (start/finish fronts meet)
-        if step >= min_dist:
-            collision = (up * state < 0) | (right * state < 0)
-            if collision.any():
-                path_found = True
-                meetpoints = np.argwhere(collision)
-                break
-
-        # Propagate distances
-        down = shift_down(state)
-        left = shift_left(state)
-
-        neighbors = np.stack([up, down, left, right])
-        pos = np.where(neighbors > 0, neighbors, INT_MAX).min(axis=0)
-        neg = np.where(neighbors < 0, neighbors, INT_MIN).max(axis=0)
-        new_distances = np.where(pos != INT_MAX, pos + 1,
-                                 np.where(neg != INT_MIN, neg - 1, 0))
-        new_distances *= np.where(state == 0, wall_mask, 0)  # Only update empty cells
-
-        state += new_distances
-        step += 1
-
-        if visualize:
-            states.append(state.copy())
-
-        max_pos = np.where(state > 0, state, INT_MIN).max()
-        min_neg = np.where(state < 0, state, INT_MAX).min()
-
-        # Check for no progress, meaning no solution
-        if abs(max_pos + min_neg) > 1 or (min_neg == prev_min_neg and max_pos == prev_max_pos):
-            return None, time.time_ns() - start_time, 0, step
-
-        prev_max_pos = max_pos
-        prev_min_neg = min_neg
 
     # -------------------------
     # Path reconstruction
@@ -199,9 +149,11 @@ def find_shortest_path(labyrinth_map: np.ndarray, visualize: bool = False):
     path = []
 
     if path_found:
-        s = state.shape
+        s = state.shape 
+
+        # We could choose a random meetpoint here but decided to go with the first one
         x, y = int(meetpoints[0][0]), int(meetpoints[0][1])
-        path.append((x, y))
+        path.append((x, y, state[x, y]))
 
         # From meetpoint to start
         while state[x, y] != 1:
@@ -218,13 +170,13 @@ def find_shortest_path(labyrinth_map: np.ndarray, visualize: bool = False):
                     smallest = ((i, j), val)
 
             x, y = smallest[0]
-            path.append((x, y))
+            path.append((x, y, state[x, y]))
         path.reverse()
 
         # From meetpoint to finish
         x, y = int(meetpoints[0][0]), int(meetpoints[0][1])
         while state[x, y] != -1:
-            largest = ((0, 0), -1000000000)
+            largest = ((0, 0), -1000000000) # magic number because for some reaason -np.inf doesn't work
             neighbors = []
             if x >= 1: neighbors.append((x-1, y))
             if y >= 1: neighbors.append((x, y-1))
@@ -237,10 +189,67 @@ def find_shortest_path(labyrinth_map: np.ndarray, visualize: bool = False):
                     largest = ((i, j), val)
 
             x, y = largest[0]
-            path.append((x, y))
+            path.append((x, y, state[x, y]))
 
     elapsed2 = time.time_ns() - start_time
-    return path, elapsed1, elapsed2, step
+    return path, elapsed1, elapsed2, step_taken
+
+
+def propagate_distances_through_map(labyrinth_map: np.ndarray, meetpoints: list, visualize_freq: int, states: list) -> tuple:
+
+    wall_mask, state, min_dist = initialize(labyrinth_map)
+
+    path_found = False
+    step = 1
+
+
+    if visualize_freq:
+        states.append(state.copy())
+
+    prev_min_neg = 0
+    prev_max_pos = 0
+
+    while not path_found:
+        up = shift_up(state)
+        right = shift_right(state)
+
+        # Check for collision (start/finish fronts meet)
+        if step >= min_dist:
+            collision = (up * state < 0) | (right * state < 0)
+            if collision.any():
+                path_found = True
+                meetpoints.append(np.argwhere(collision)[0])
+                break
+
+        # Propagate distances
+        down = shift_down(state)
+        left = shift_left(state)
+
+        neighbors = np.stack([up, down, left, right])
+        pos = np.where(neighbors > 0, neighbors, INT_MAX).min(axis=0)
+        neg = np.where(neighbors < 0, neighbors, INT_MIN).max(axis=0)
+        new_distances = np.where(pos != INT_MAX, pos + 1,
+                                 np.where(neg != INT_MIN, neg - 1, 0))
+                                 
+        new_distances *= np.where(state == 0, wall_mask, 0)  # Only update empty cells
+
+        state += new_distances
+        step += 1
+
+        if step % visualize_freq == 0 and visualize_freq > 0:
+            states.append(state.copy())
+
+        max_pos = np.where(state > 0, state, INT_MIN).max()
+        min_neg = np.where(state < 0, state, INT_MAX).min()
+
+        # Check for no progress, meaning no solution
+        if abs(max_pos + min_neg) > 1 or (min_neg == prev_min_neg and max_pos == prev_max_pos):
+            break
+
+        prev_max_pos = max_pos
+        prev_min_neg = min_neg
+
+    return path_found, state, step
 
 
 if __name__ == "__main__":
@@ -303,11 +312,13 @@ if __name__ == "__main__":
     # -------------------------
     s = 50  # Labyrinth size
     lab_map = generate_random_labyrinth(s)
-    #print("Generated labyrinth:")
-    #print(lab_map)  # Debug: show the labyrinth in the terminal
+    
+    # get the wall mask
+    walls = initialize(lab_map)[0]
 
+    states = []
     # Find shortest path and store all propagation states
-    path, propagation_time, reconstruction_time, steps = find_shortest_path(lab_map, visualize=True)
+    path, propagation_time, reconstruction_time, steps = find_shortest_path(lab_map, visualize_freq=5, states=states)
     if path:
         print(f"Path found in {steps} steps!")
         print("Shortest path:", path)
